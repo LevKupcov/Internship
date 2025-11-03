@@ -3,19 +3,6 @@
 /upload/
 /urlrewrite.php
 
-# Кеш Битрикс
-/bitrix/cache/
-/bitrix/managed_cache/
-/bitrix/stack_cache/
-
-# Бэкапы Битрикс
-/bitrix/backup/
-/bitrix/updates/
-
-# Локальная конфигурация
-/bitrix/.settings.php
-/bitrix/php_interface/dbconn.php
-
 # Системные файлы ОС
 .DS_Store
 Thumbs.db
