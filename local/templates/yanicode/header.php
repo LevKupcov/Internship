@@ -17,10 +17,11 @@ use Bitrix\Main\Page\Asset;
 	<title><? $APPLICATION->ShowTitle(); ?></title>
 
 	<?php
-	Asset::getInstance()->addCss('/www/local/assets/template_styles.css');
-	Asset::getInstance()->addJs('/www/local/assets/js/vendor/inputmask.min.js');
-	Asset::getInstance()->addJs('/www/local/assets/js/vendor/swiper-bundle.min.js');
-	Asset::getInstance()->addJs('/www/local/assets/js/build.js');
+	$templatePath = SITE_TEMPLATE_PATH;
+	Asset::getInstance()->addCss($templatePath . '/assets/template_styles.css');
+	Asset::getInstance()->addJs($templatePath . '/assets/js/vendor/inputmask.min.js');
+	Asset::getInstance()->addJs($templatePath . '/assets/js/vendor/swiper-bundle.min.js');
+	Asset::getInstance()->addJs($templatePath . '/assets/js/build.js');
 	?>
 
 	<? $APPLICATION->ShowHead(); ?>
@@ -265,7 +266,7 @@ use Bitrix\Main\Page\Asset;
 	<div class="container">
 		<div class="header-wrapper">
 			<a href="/" class="header__logo">
-				<img width="300" height="92" src="/www/local/assets/images/svg/logo-yanicode.svg" alt="yanicode">
+				<img width="300" height="92" src="<?=SITE_TEMPLATE_PATH?>/assets/images/svg/logo-yanicode.svg" alt="yanicode">
 			</a>
 			<div class="header__burger header__burger_close">
 				<span class="burger-line"></span>

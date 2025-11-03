@@ -2,12 +2,39 @@
 require $_SERVER['DOCUMENT_ROOT'].'/bitrix/header.php';
 $APPLICATION->SetTitle("Главная");
 
+// Загружаем HTML и извлекаем только контент main
+ob_start();
 include __DIR__.'/home-content.html';
+$html = ob_get_clean();
 
+// Правим пути к ассетам шаблона
+$templatePath = SITE_TEMPLATE_PATH;
+$replacements = [
+    'href="./assets'         => 'href="' . $templatePath . '/assets',
+    'src="./assets'          => 'src="' . $templatePath . '/assets',
+    "url('./assets"          => "url('" . $templatePath . "/assets",
+];
+foreach ($replacements as $from => $to) {
+    $html = str_replace($from, $to, $html);
+}
 
-CModule::IncludeModule("iblock");
-$resBlog = CIBlock::GetList(Array(), Array("CODE" => "blog", "TYPE" => "content"));
-if ($arBlog = $resBlog->Fetch() && $arBlog['ID']) {
+// Удаляем встроенные header и footer, берём только main
+$html = preg_replace('#<head[\s\S]*?</head>#i', '', $html, 1);
+$html = preg_replace('#<header[\s\S]*?</header>#i', '', $html, 1);
+$html = preg_replace('#<footer[\s\S]*?</footer>#i', '', $html, 1);
+
+// Извлекаем содержимое main
+if (preg_match('#<main[\s\S]*?</main>#i', $html, $m)) {
+    $mainContent = $m[0];
+    
+    // Удаляем статичный блок блога из HTML и вставляем маркер для компонента
+    $mainContent = preg_replace('#<section class="container">\s*<div class="blog-list">[\s\S]*?</div>\s*</section>#i', '<!--BLOG_COMPONENT-->', $mainContent);
+    
+    // Теперь получаем компонент блога
+    ob_start();
+    CModule::IncludeModule("iblock");
+    $resBlog = CIBlock::GetList(Array(), Array("CODE" => "blog", "TYPE" => "content"));
+    if ($arBlog = $resBlog->Fetch() && $arBlog['ID']) {
 	$APPLICATION->IncludeComponent(
 		"bitrix:news.list",
 		"blog",
@@ -56,7 +83,7 @@ if ($arBlog = $resBlog->Fetch() && $arBlog['ID']) {
 		<div class="blog-list">
 			<a href="/statya-1.php" class="blog">
 				<div class="blog__img">
-					<img width="100%" height="100%" src="/www/local/assets/images/test_blog-img1.jpg" alt="">
+					<img width="100%" height="100%" src="<?=SITE_TEMPLATE_PATH?>/assets/images/test_blog-img1.jpg" alt="">
 				</div>
 				<div class="blog__desc">
 					<div class="blog__title">Что такое продакш-студия и для чего она нужна?</div>
@@ -66,7 +93,7 @@ if ($arBlog = $resBlog->Fetch() && $arBlog['ID']) {
 			</a>
 			<a href="/statya-2.php" class="blog">
 				<div class="blog__img">
-					<img width="100%" height="100%" src="/www/local/assets/images/test_blog-img2.jpg" alt="">
+					<img width="100%" height="100%" src="<?=SITE_TEMPLATE_PATH?>/assets/images/test_blog-img2.jpg" alt="">
 				</div>
 				<div class="blog__desc">
 					<div class="blog__title">Личный бренд и что такое продакш- студия</div>
@@ -76,7 +103,7 @@ if ($arBlog = $resBlog->Fetch() && $arBlog['ID']) {
 			</a>
 			<a href="/statya-3.php" class="blog">
 				<div class="blog__img">
-					<img width="100%" height="100%" src="/www/local/assets/images/test_blog-img3.jpg" alt="">
+					<img width="100%" height="100%" src="<?=SITE_TEMPLATE_PATH?>/assets/images/test_blog-img3.jpg" alt="">
 				</div>
 				<div class="blog__desc">
 					<div class="blog__title">Что такое продакш-студия и для чего она нужна?</div>
@@ -86,7 +113,7 @@ if ($arBlog = $resBlog->Fetch() && $arBlog['ID']) {
 			</a>
 			<a href="/statya-4.php" class="blog">
 				<div class="blog__img">
-					<img width="100%" height="100%" src="/www/local/assets/images/test_blog-img4.jpg" alt="">
+					<img width="100%" height="100%" src="<?=SITE_TEMPLATE_PATH?>/assets/images/test_blog-img4.jpg" alt="">
 				</div>
 				<div class="blog__desc">
 					<div class="blog__title">Личный бренд и что такое продакш- студия</div>
@@ -97,6 +124,14 @@ if ($arBlog = $resBlog->Fetch() && $arBlog['ID']) {
 		</div>
 	</section>
 	<?php
+    }
+    $blogComponent = ob_get_clean();
+    
+    // Заменяем маркер на реальный компонент блога
+    $mainContent = str_replace('<!--BLOG_COMPONENT-->', $blogComponent, $mainContent);
+    
+    // Выводим финальный контент
+    echo $mainContent;
 }
 
 require $_SERVER['DOCUMENT_ROOT'].'/bitrix/footer.php';

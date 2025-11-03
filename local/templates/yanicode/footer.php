@@ -5,9 +5,9 @@
 <footer class="footer">
 	<div class="container">
 		<div class="footer-wrapper">
-			<a href="/" class="footer__logo">
-				<img width="232" height="71" src="/www/local/assets/images/svg/logo-yanicode.svg" alt="yanicode">
-			</a>
+		<a href="/" class="footer__logo">
+			<img width="232" height="71" src="<?=SITE_TEMPLATE_PATH?>/assets/images/svg/logo-yanicode.svg" alt="yanicode">
+		</a>
 			
 			<div class="footer__nav">
 				<? $APPLICATION->IncludeComponent(
