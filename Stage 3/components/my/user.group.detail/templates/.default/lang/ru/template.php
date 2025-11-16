@@ -1,0 +1,6 @@
+<?php
+
+$MESS['MY_USER_GROUP_DETAIL_FIELD_ID'] = 'ID';
+$MESS['MY_USER_GROUP_DETAIL_FIELD_NAME'] = 'Название группы';
+$MESS['MY_USER_GROUP_DETAIL_FIELD_DESCRIPTION'] = 'Описание группы';
+

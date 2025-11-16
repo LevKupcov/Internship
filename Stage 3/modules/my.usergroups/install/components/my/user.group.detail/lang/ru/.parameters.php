@@ -1,0 +1,4 @@
+<?php
+
+$MESS['MY_USER_GROUP_DETAIL_PARAM_GROUP_ID'] = 'ID группы';
+
