@@ -1,0 +1,8 @@
+SELECT 
+    u.firstName, 
+    u.lastName, 
+    c.city 
+FROM 
+    user u
+JOIN 
+    city c ON u.city = c.id;

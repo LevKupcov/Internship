@@ -1,0 +1,29 @@
+# Системные папки Битрикс
+/bitrix/
+/upload/
+/urlrewrite.php
+
+# Системные файлы ОС
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Файлы IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Временные файлы
+*.log
+*.tmp
+*.bak
+
+# Node modules (если используется npm)
+node_modules/
+
+# Тестовые файлы
+test*.php
+test*.html
+
