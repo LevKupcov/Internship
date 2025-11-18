@@ -56,12 +56,11 @@ class my_usergroups extends CModule
     public function UnInstallFiles(): bool
     {
         $documentRoot = Application::getDocumentRoot();
-
-        DeleteDirFilesEx('/local/components/my/user.card');
-        DeleteDirFilesEx('/local/components/my/user.group.detail');
-        DeleteDirFilesEx('/local/components/my/user.groups');
+        
+        DeleteDirFilesEx($documentRoot . '/local/components/my/user.card');
+        DeleteDirFilesEx($documentRoot . '/local/components/my/user.group.detail');
+        DeleteDirFilesEx($documentRoot . '/local/components/my/user.groups');
 
         return true;
     }
 }
-

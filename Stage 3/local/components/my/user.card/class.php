@@ -26,7 +26,6 @@ class MyUserCardComponent extends CBitrixComponent
         $groupIterator = GroupTable::getList([
             'select' => ['ID', 'NAME', 'DESCRIPTION'],
             'order' => ['NAME' => 'ASC'],
-            'filter' => [],
         ]);
 
         while ($group = $groupIterator->fetch()) {
@@ -45,9 +44,7 @@ class MyUserCardComponent extends CBitrixComponent
         global $APPLICATION;
 
         if (!Loader::includeModule('main')) {
-            $this->abortResultCache();
             ShowError(Loc::getMessage('MY_USER_CARD_MAIN_MODULE_ERROR'));
-
             return;
         }
 
@@ -66,4 +63,3 @@ class MyUserCardComponent extends CBitrixComponent
         }
     }
 }
-
