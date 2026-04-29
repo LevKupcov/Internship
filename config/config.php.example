@@ -1,0 +1,12 @@
+<?php
+
+return [
+    'app_name' => 'Bitrix24 Company Enricher',
+    'debug' => true,
+
+    // В следующих шагах можно добавить API-ключи парсинга/AI.
+    'ai' => [
+        'provider' => 'bitrix24',
+        'model' => 'default',
+    ],
+];
