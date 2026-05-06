@@ -28,7 +28,7 @@ declare(strict_types=1);
 </head>
 <body>
 <div class="card">
-    <h2 style="margin-top:0;">AI-обогащение компании</h2>
+    <h2 style="margin-top:0;">Обогащение компании</h2>
     <p class="muted">Укажите сайт компании или домен и нажмите "Обогатить".</p>
 
     <div class="row">
