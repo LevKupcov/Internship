@@ -1,59 +1,36 @@
 # Bitrix24 — обогащение карточки компании
 
-Встраиваемое приложение для Bitrix24: вкладка **«Обогатить»** в карточке компании (CRM). По домену сайта собираются контакты, соцсети, адрес, реквизиты и предлагаются поля для записи в CRM.
+Встраиваемое приложение для Bitrix24 (CRM): во вкладке карточки компании можно подтянуть с сайта контакты, соцсети, адрес и реквизиты и перенести предложенные значения в поля CRM. Есть маппинг пользовательских полей и опциональное участие Bitrix AI по настройке.
 
 ## Структура репозитория
 
 | Путь | Назначение |
 |------|------------|
-| `bootstrap.php` | Константы корня проекта и путей (`ENRICHER_ROOT`, `ENRICHER_SRC`, `ENRICHER_STORAGE`, `ENRICHER_CONFIG`). Подключается из `public/` и `scripts/`. |
-| `public/` | **Корень для веб-сервера** (DocumentRoot): `index.php` (UI), `enrich.php` (API), `install.php` (установка), `mapping.php` (маппинг UF), `app.js`. |
-| `src/` | PHP: парсинг сайта, обогащение, Bitrix REST/AI, логирование. |
-| `config/` | `config.php.example` — шаблон; `config.php` создаётся локально (не в git). |
-| `storage/` | Записываемые данные: `logs/enrichment-history.jsonl`, `mapping/mapping-store.json`. В git только `.gitkeep`. |
-| `scripts/` | CLI и Node: `debug-extractor.php`, `render-contact-data.js` (Puppeteer для SPA), `start-ngrok.js`. |
+| `bootstrap.php` | Константы корня и путей (`ENRICHER_ROOT`, `ENRICHER_SRC`, `ENRICHER_STORAGE`, `ENRICHER_CONFIG`). Подключается из `public/` и `scripts/`. |
+| `public/` | Веб-корень: `index.php` (интерфейс), `enrich.php` (API обогащения), `install.php` (установка приложения), `mapping.php` (хранение маппинга UF), `app.js`. |
+| `src/` | PHP: извлечение данных с сайта, сборка полей, REST Bitrix, AI-маппинг, логирование. |
+| `config/` | `config.php.example` — шаблон; рабочий `config.php` не коммитится. |
+| `storage/` | Служебные файлы: `logs/enrichment-history.jsonl`, `mapping/mapping-store.json`. В репозитории только `.gitkeep`. |
+| `scripts/` | `debug-extractor.php` (CLI-проверка парсера), `render-contact-data.js` (Puppeteer для тяжёлых страниц), `start-ngrok.js` (вспомогательный туннель для разработки). |
 
-Зависимости Node (`puppeteer`, `@ngrok/ngrok`) нужны для fallback-рендера контактов и туннеля; каталог `node_modules/` в git не попадает.
+`node_modules/` не входит в git; зависимости Node нужны, если используется Puppeteer и вспомогательные npm-скрипты.
 
 ## Требования
 
 - PHP 8.1+ с расширениями: `curl`, `dom`, `json`, `mbstring`.
-- Веб-сервер (Apache в XAMPP или nginx) с **DocumentRoot = `public/`** либо URL вида `…/public/index.php`.
-- Для Bitrix24 в облаке — публичный **HTTPS** (часто ngrok к локальному Apache).
-- Node.js 18+ для `npm install` (если используете Puppeteer-fallback и `npm run ngrok`).
+- Веб-сервер с раздачей каталога **`public/`** как корня сайта (или эквивалентный маршрут к тем же скриптам).
+- Для облачного Bitrix24 — доступ к приложению по **HTTPS**.
+- Node.js 18+ и `npm install` — только если нужны скрипты из `scripts/` на Node (в т.ч. Puppeteer).
 
-## Установка
+## Конфигурация и Bitrix
 
-1. Клонировать репозиторий, перейти в каталог проекта.
-2. `copy config\config.php.example config\config.php` (Windows) и при необходимости заполнить секции `ai`, `crm` (см. комментарии в example).
-3. `npm install` — если нужны скрипты Node.
-4. Убедиться, что веб-сервер отдаёт `public/index.php` по HTTPS-URL, который вы укажете в Bitrix.
+Скопируйте `config/config.php.example` в `config/config.php` и заполните секции по комментариям в example. В настройках локального приложения Bitrix24 укажите публичные URL на `public/index.php` и `public/install.php`; права — на методы CRM компании и при необходимости на placement, как требует ваш сценарий установки.
 
-## Bitrix24: локальное приложение
+## API (кратко)
 
-1. **Приложения → Разработчикам → Локальное приложение.**
-2. URL приложения: `https://<ваш-хост>/public/index.php`  
-   URL установки: `https://<ваш-хост>/public/install.php`
-3. Права: CRM (`crm.company.get`, `crm.company.update`, `crm.company.fields`), при необходимости placement (`placement.bind` / `unbind`).
-4. После установки откройте карточку компании → вкладка **Обогатить** → при необходимости **UF-поля** / сохранение маппинга → **Обогатить** → **Применить в CRM**.
-
-## API
-
-- **POST** `public/enrich.php` — тело JSON: `{ "domain": "example.com", "aiContext": { "portalDomain", "authToken" }, "contactUrl": "" }`. Ответ: `{ "ok", "suggestedFields": { ... } }`.
-- **GET/POST** `public/mapping.php` — серверное хранение маппинга UF (см. `public/app.js`).
-
-## Отладка парсера (CLI)
-
-```bash
-php scripts/debug-extractor.php example.com
-```
-
-## ngrok (Windows)
-
-1. Токен: [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken).
-2. `setx NGROK_AUTHTOKEN "ваш_токен"` и новый терминал.
-3. В каталоге проекта: `npm run ngrok` (проброс порта по умолчанию 80 — настройте под свой Apache).
+- **POST** `enrich.php` — JSON с доменом и контекстом AI; ответ с предложенными полями.
+- **GET/POST** `mapping.php` — серверное хранение маппинга UF для UI.
 
 ## Лицензия
 
-Используйте и дорабатывайте под свои нужды; при публикации форка укажите ссылку на исходный репозиторий по желанию.
+Используйте и дорабатывайте под свои нужды; при публикации форка ссылка на исходный репозиторий — по желанию.
