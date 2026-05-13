@@ -2,32 +2,475 @@
 
 declare(strict_types=1);
 
+/**
+ * Сборка полей CRM из фактов сайта: парсинг → нормализация → дедуп контактов → маппинг UF/AI.
+ * Домен и «чистый» WEB для карточки задаются через parseSiteInput() (без www/path/query).
+ */
 final class CompanyEnricher
 {
-    public function enrichByDomain(string $domain): array
+    private SiteProfileExtractor $extractor;
+    private AiProfileNormalizer $normalizer;
+    private BitrixAiMapper $bitrixAiMapper;
+    private array $config;
+
+    public function __construct(
+        ?SiteProfileExtractor $extractor = null,
+        ?AiProfileNormalizer $normalizer = null,
+        ?BitrixAiMapper $bitrixAiMapper = null,
+        array $config = []
+    )
     {
-        $normalizedDomain = $this->normalizeDomain($domain);
-        $baseUrl = 'https://' . $normalizedDomain;
-        $discovery = $this->discoverContactsPage($baseUrl);
-        $contactsData = $this->extractContactsData($discovery['html'], $discovery['url']);
-        $comments = $this->buildComments($contactsData, $discovery['url']);
+        $this->extractor = $extractor ?? new SiteProfileExtractor();
+        $this->normalizer = $normalizer ?? new AiProfileNormalizer();
+        $this->bitrixAiMapper = $bitrixAiMapper ?? new BitrixAiMapper();
+        $this->config = $config;
+    }
+
+    public function enrichByDomain(string $domain, array $aiContext = []): array
+    {
+        $parsed = $this->parseSiteInput($domain);
+        $normalizedHost = $parsed['host'];
+        $preferredPath = $parsed['path'];
+        $webDisplay = $parsed['web'];
+
+        $companyName = $this->guessCompanyName($normalizedHost);
+        $siteFacts = $this->extractor->extract($normalizedHost, $preferredPath);
+        $normalizedFacts = $this->normalizer->normalize($siteFacts);
+
+        $titleFromSite = trim((string)($siteFacts['title'] ?? ''));
+        $legalName = trim((string)($siteFacts['company_legal_name'] ?? ''));
+        $emailFromSite = (string)($siteFacts['emails'][0] ?? '');
+        $phoneFromSite = (string)(($siteFacts['phones'][0] ?? ''));
+        $socials = $siteFacts['socials'] ?? [];
+        $socialHandles = $siteFacts['social_handles'] ?? [];
+        $telegramUrl = trim((string)($siteFacts['telegram_url'] ?? ''));
+        $telegramUsername = trim((string)($siteFacts['telegram_username'] ?? ''));
+        $departmentContacts = trim((string)($siteFacts['department_contacts'] ?? ''));
+        $departmentMap = $this->parseDepartmentContacts($departmentContacts);
+        $companyDescription = trim((string)($siteFacts['company_description'] ?? ''));
+        $inn = trim((string)($siteFacts['inn'] ?? ''));
+        $kpp = trim((string)($siteFacts['kpp'] ?? ''));
+        $ogrn = trim((string)($siteFacts['ogrn'] ?? ''));
+        $legalEmail = trim((string)($siteFacts['legal_email'] ?? ''));
+        $addressFromSite = trim((string)($siteFacts['address'] ?? ''));
+        $cityFromSite = trim((string)($siteFacts['city'] ?? ''));
+        $industryRaw = trim((string)($normalizedFacts['industry'] ?? ''));
+        $industry = mb_strtolower($industryRaw) === 'не определено' ? '' : $industryRaw;
+        $city = $cityFromSite !== '' ? $cityFromSite : (string)($normalizedFacts['city'] ?? '');
+        $summary = (string)($normalizedFacts['summary'] ?? '');
+
+        $result = [
+            'TITLE' => $this->pickTitle($legalName, $titleFromSite, $companyName),
+            'WEB' => $webDisplay,
+            'EMAIL' => $emailFromSite,
+            'PHONE' => $phoneFromSite,
+            'INDUSTRY' => $industry,
+            'ADDRESS' => $addressFromSite,
+            'ADDRESS_CITY' => $city,
+            'COMMENTS' => $companyDescription,
+            'PROFILE_SUMMARY' => $summary,
+            'SOCIALS_RAW' => implode(', ', $socials),
+            'SOCIAL_HANDLES' => implode(', ', $socialHandles),
+            'UF_CRM_SOCIALS_RAW' => implode(', ', $socials),
+            'TELEGRAM' => $telegramUrl,
+            'TELEGRAM_USERNAME' => $telegramUsername,
+            'DEPARTMENT_CONTACTS' => $departmentContacts,
+            'DEPT_PROMO_CONTACT' => (string)($departmentMap['promo'] ?? ''),
+            'DEPT_ADS_CONTACT' => (string)($departmentMap['ads'] ?? ''),
+            'DEPT_SUPPORT_CONTACT' => (string)($departmentMap['support'] ?? ''),
+            'INN' => $inn,
+            'KPP' => $kpp,
+            'OGRN' => $ogrn,
+            'LEGAL_EMAIL' => $legalEmail,
+        ];
+
+        $result = $this->dedupeContactFieldsAcrossChannels($result);
+        $result = $this->applyBitrixAiMapping($aiContext, $siteFacts, $result);
+        $result = $this->dedupeContactFieldsAcrossChannels($result);
+        $result = $this->applyCustomFieldMapping($result, $normalizedFacts);
+
+        return $this->dedupeContactFieldsAcrossChannels($result);
+    }
+
+    private function pickTitle(string $legalName, string $siteTitle, string $fallback): string
+    {
+        if ($legalName !== '') {
+            return $legalName;
+        }
+
+        $cleanTitle = $this->normalizeSiteTitle($siteTitle);
+        if ($cleanTitle !== '') {
+            $lower = mb_strtolower($cleanTitle);
+            if (
+                mb_strpos($lower, 'контакт') === false &&
+                mb_strpos($lower, 'contact') === false &&
+                mb_strpos($lower, 'помогает бизнесу') === false &&
+                mb_strpos($lower, 'выберите') === false
+            ) {
+                return $cleanTitle;
+            }
+        }
+
+        return $fallback;
+    }
+
+    private function normalizeSiteTitle(string $siteTitle): string
+    {
+        $title = trim(preg_replace('/\s+/u', ' ', $siteTitle) ?? $siteTitle);
+        if ($title === '') {
+            return '';
+        }
+
+        $parts = preg_split('/\s*[|\/]\s*/u', $title) ?: [];
+        if (count($parts) > 1) {
+            foreach ($parts as $part) {
+                $part = trim($part);
+                if ($part === '') {
+                    continue;
+                }
+                $lower = mb_strtolower($part);
+                if (
+                    mb_strpos($lower, 'выберите') !== false ||
+                    mb_strpos($lower, 'welcome') !== false ||
+                    mb_strpos($lower, 'главная') !== false
+                ) {
+                    continue;
+                }
+
+                return $part;
+            }
+        }
+
+        return $title;
+    }
+
+    private function applyBitrixAiMapping(array $aiContext, array $siteFacts, array $result): array
+    {
+        $provider = mb_strtolower((string)($this->config['ai']['provider'] ?? ''));
+        if ($provider !== 'bitrix24') {
+            return $result;
+        }
+
+        $portalDomain = trim((string)($aiContext['portalDomain'] ?? ''));
+        $authToken = trim((string)($aiContext['authToken'] ?? ''));
+        if ($portalDomain === '' || $authToken === '') {
+            return $result;
+        }
+
+        try {
+            $aiMapped = $this->bitrixAiMapper->mapFields(
+                $portalDomain,
+                $authToken,
+                $siteFacts,
+                $result,
+                $this->config
+            );
+        } catch (Throwable $e) {
+            return $result;
+        }
+
+        if (!is_array($aiMapped) || $aiMapped === []) {
+            return $result;
+        }
+
+        foreach ($aiMapped as $field => $value) {
+            if (!is_string($field)) {
+                continue;
+            }
+            if (!is_scalar($value)) {
+                continue;
+            }
+            $value = trim((string)$value);
+            if ($value === '') {
+                continue;
+            }
+
+            if (preg_match('/^(TITLE|WEB|EMAIL|PHONE|INDUSTRY|ADDRESS|ADDRESS_CITY|COMMENTS|PROFILE_SUMMARY|SOCIALS_RAW|SOCIAL_HANDLES|TELEGRAM|TELEGRAM_USERNAME|DEPARTMENT_CONTACTS|DEPT_PROMO_CONTACT|DEPT_ADS_CONTACT|DEPT_SUPPORT_CONTACT|INN|KPP|OGRN|LEGAL_EMAIL|UF_CRM_.*)$/i', $field) === 1) {
+                $result[$field] = $value;
+            }
+        }
+
+        return $result;
+    }
+
+    private function applyCustomFieldMapping(array $result, array $normalizedFacts): array
+    {
+        $mapping = $this->config['crm']['custom_field_mapping'] ?? [];
+        if (!is_array($mapping) || $mapping === []) {
+            return $result;
+        }
+
+        $sourceData = [
+            'industry' => (string)($result['INDUSTRY'] ?? ''),
+            'city' => (string)($result['ADDRESS_CITY'] ?? ''),
+            'socials_raw' => (string)($result['UF_CRM_SOCIALS_RAW'] ?? ''),
+            'social_handles' => (string)($result['SOCIAL_HANDLES'] ?? ''),
+            'ai_summary' => (string)($normalizedFacts['summary'] ?? ''),
+            'telegram_url' => (string)($result['TELEGRAM'] ?? ''),
+            'telegram_username' => (string)($result['TELEGRAM_USERNAME'] ?? ''),
+            'department_contacts' => (string)($result['DEPARTMENT_CONTACTS'] ?? ''),
+            'dept_promo_contact' => (string)($result['DEPT_PROMO_CONTACT'] ?? ''),
+            'dept_ads_contact' => (string)($result['DEPT_ADS_CONTACT'] ?? ''),
+            'dept_support_contact' => (string)($result['DEPT_SUPPORT_CONTACT'] ?? ''),
+            'inn' => (string)($result['INN'] ?? ''),
+            'kpp' => (string)($result['KPP'] ?? ''),
+            'ogrn' => (string)($result['OGRN'] ?? ''),
+            'legal_email' => (string)($result['LEGAL_EMAIL'] ?? ''),
+        ];
+
+        foreach ($mapping as $targetField => $sourceKey) {
+            if (!is_string($targetField) || !is_string($sourceKey)) {
+                continue;
+            }
+
+            $value = trim((string)($sourceData[$sourceKey] ?? ''));
+            if ($value !== '') {
+                $result[$targetField] = $value;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Канонический вид для CRM: только хост без схемы, без «www.», без пути и без query
+     * (например consult-info.ru).
+     */
+    private function stripLeadingWwwFromHost(string $host): string
+    {
+        $h = mb_strtolower(trim($host));
+        if (str_starts_with($h, 'www.')) {
+            return mb_substr($h, 4);
+        }
+
+        return $h;
+    }
+
+    /**
+     * Разбор ввода: всегда только основной домен (без /разделов, без ?параметров, без #).
+     *
+     * @return array{host:string, path:string, web:string}
+     */
+    private function parseSiteInput(string $raw): array
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            throw new InvalidArgumentException('Invalid domain');
+        }
+
+        $host = '';
+
+        if (preg_match('#^https?://#i', $raw) === 1) {
+            $u = parse_url($raw);
+            if (!is_array($u) || empty($u['host'])) {
+                throw new InvalidArgumentException('Invalid URL');
+            }
+            $host = mb_strtolower((string)$u['host']);
+        } else {
+            $s = preg_replace('#^//+#', '', $raw) ?? $raw;
+            $qPos = strpos($s, '?');
+            if ($qPos !== false) {
+                $s = substr($s, 0, $qPos);
+            }
+            $hPos = strpos($s, '#');
+            if ($hPos !== false) {
+                $s = substr($s, 0, $hPos);
+            }
+            $slashPos = strpos($s, '/');
+            if ($slashPos !== false) {
+                $host = mb_strtolower(substr($s, 0, $slashPos));
+            } else {
+                $host = mb_strtolower($s);
+            }
+        }
+
+        $host = trim($host);
+        $host = trim($host, '.');
+        if ($host === '') {
+            throw new InvalidArgumentException('Invalid domain');
+        }
+
+        $host = $this->stripLeadingWwwFromHost($host);
 
         return [
-            'TITLE' => $contactsData['fields']['company_name']['value'] ?? $this->guessCompanyName($normalizedDomain),
-            'WEB' => $baseUrl,
-            'EMAIL' => $contactsData['fields']['email']['value'] ?? '',
-            'PHONE' => $contactsData['fields']['phone']['value'] ?? '',
-            'INDUSTRY' => 'Не определено',
-            'ADDRESS_CITY' => $this->extractCity($contactsData['fields']['address']['value'] ?? ''),
-            'COMMENTS' => $comments,
-            '_verification' => [
-                'sourceUrl' => $discovery['url'],
-                'contactsPageFound' => $discovery['contacts_page_found'],
-                'fields' => $contactsData['fields'],
-                'conflicts' => $contactsData['conflicts'],
-                'needsReview' => !empty($contactsData['conflicts']),
-            ],
+            'host' => $host,
+            'path' => '',
+            'web' => $host,
         ];
+    }
+
+    /**
+     * Убирает из отделов те же email/телефоны, что уже в EMAIL/PHONE, и дубли между отделами.
+     *
+     * @param array<string, string> $r
+     *
+     * @return array<string, string>
+     */
+    private function dedupeContactFieldsAcrossChannels(array $r): array
+    {
+        $emailMain = mb_strtolower(trim((string)($r['EMAIL'] ?? '')));
+        $phoneMainDigits = $this->phoneDigitsForCompare((string)($r['PHONE'] ?? ''));
+
+        $filteredDept = $this->filterDepartmentContactsString(
+            (string)($r['DEPARTMENT_CONTACTS'] ?? ''),
+            $emailMain,
+            $phoneMainDigits
+        );
+        $r['DEPARTMENT_CONTACTS'] = $filteredDept;
+
+        $map = $this->parseDepartmentContacts($filteredDept);
+        $r['DEPT_PROMO_CONTACT'] = (string)($map['promo'] ?? '');
+        $r['DEPT_ADS_CONTACT'] = (string)($map['ads'] ?? '');
+        $r['DEPT_SUPPORT_CONTACT'] = (string)($map['support'] ?? '');
+
+        foreach (['DEPT_PROMO_CONTACT', 'DEPT_ADS_CONTACT', 'DEPT_SUPPORT_CONTACT'] as $k) {
+            $v = trim((string)($r[$k] ?? ''));
+            if ($v === '') {
+                continue;
+            }
+            if ($emailMain !== '' && str_contains($v, '@') && mb_strtolower($v) === $emailMain) {
+                $r[$k] = '';
+
+                continue;
+            }
+            $pd = $this->phoneDigitsForCompare($v);
+            if ($phoneMainDigits !== '' && $pd !== '' && $pd === $phoneMainDigits) {
+                $r[$k] = '';
+            }
+        }
+
+        $legal = mb_strtolower(trim((string)($r['LEGAL_EMAIL'] ?? '')));
+        if ($legal !== '' && $legal === $emailMain) {
+            $r['LEGAL_EMAIL'] = '';
+        }
+
+        $r['DEPARTMENT_CONTACTS'] = $this->filterDepartmentSegmentsAgainstStructuredDepts(
+            (string)($r['DEPARTMENT_CONTACTS'] ?? ''),
+            $r
+        );
+
+        return $r;
+    }
+
+    /**
+     * Убирает из DEPARTMENT_CONTACTS строки, уже представленные в DEPT_* (тот же телефон/email).
+     *
+     * @param array<string, string> $r
+     */
+    private function filterDepartmentSegmentsAgainstStructuredDepts(string $raw, array $r): string
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return '';
+        }
+        $reserve = [];
+        foreach (['DEPT_PROMO_CONTACT', 'DEPT_ADS_CONTACT', 'DEPT_SUPPORT_CONTACT'] as $k) {
+            $v = trim((string)($r[$k] ?? ''));
+            if ($v === '') {
+                continue;
+            }
+            if (str_contains($v, '@')) {
+                $reserve['e:' . mb_strtolower($v)] = true;
+            } else {
+                $d = $this->phoneDigitsForCompare($v);
+                if ($d !== '') {
+                    $reserve['p:' . $d] = true;
+                }
+                $reserve['t:' . mb_strtolower($v)] = true;
+            }
+        }
+        $out = [];
+        foreach (array_map('trim', explode('|', $raw)) as $part) {
+            if ($part === '' || !str_contains($part, ':')) {
+                continue;
+            }
+            [$label, $value] = array_map('trim', explode(':', $part, 2));
+            if ($value === '') {
+                continue;
+            }
+            $skip = false;
+            if (str_contains($value, '@')) {
+                if (isset($reserve['e:' . mb_strtolower($value)])) {
+                    $skip = true;
+                }
+            } else {
+                $d = $this->phoneDigitsForCompare($value);
+                if ($d !== '' && isset($reserve['p:' . $d])) {
+                    $skip = true;
+                }
+                if (isset($reserve['t:' . mb_strtolower($value)])) {
+                    $skip = true;
+                }
+            }
+            if (!$skip) {
+                $out[] = $label . ': ' . $value;
+            }
+        }
+
+        return implode(' | ', array_slice($out, 0, 8));
+    }
+
+    public function dedupeSuggestedContacts(array $result): array
+    {
+        return $this->dedupeContactFieldsAcrossChannels($result);
+    }
+
+    private function phoneDigitsForCompare(string $phone): string
+    {
+        $d = preg_replace('/\D+/', '', $phone) ?? '';
+        if ($d === '') {
+            return '';
+        }
+        if (strlen($d) >= 11 && ($d[0] === '7' || $d[0] === '8')) {
+            return substr($d, -10);
+        }
+        if (strlen($d) >= 10) {
+            return substr($d, -10);
+        }
+
+        return $d;
+    }
+
+    private function filterDepartmentContactsString(string $raw, string $emailMainLower, string $phoneMainDigits): string
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return '';
+        }
+        $out = [];
+        $seenNorm = [];
+        foreach (array_map('trim', explode('|', $raw)) as $part) {
+            if ($part === '' || !str_contains($part, ':')) {
+                continue;
+            }
+            [$label, $value] = array_map('trim', explode(':', $part, 2));
+            if ($value === '') {
+                continue;
+            }
+            $norm = '';
+            if (str_contains($value, '@')) {
+                $el = mb_strtolower($value);
+                $norm = 'e:' . $el;
+                if ($emailMainLower !== '' && $el === $emailMainLower) {
+                    continue;
+                }
+            } else {
+                $pd = $this->phoneDigitsForCompare($value);
+                $norm = 'p:' . $pd;
+                if ($phoneMainDigits !== '' && $pd !== '' && $pd === $phoneMainDigits) {
+                    continue;
+                }
+            }
+            if ($norm !== '' && isset($seenNorm[$norm])) {
+                continue;
+            }
+            if ($norm !== '') {
+                $seenNorm[$norm] = true;
+            }
+            $out[] = $label . ': ' . $value;
+        }
+
+        return implode(' | ', array_slice($out, 0, 8));
     }
 
     private function normalizeDomain(string $domain): string
@@ -42,343 +485,49 @@ final class CompanyEnricher
         return mb_strtolower($domain);
     }
 
-    /**
-     * @return array{url:string, html:string, contacts_page_found:bool}
-     */
-    private function discoverContactsPage(string $baseUrl): array
-    {
-        $homeHtml = $this->fetchUrl($baseUrl);
-        $homeLinks = $this->extractLinks($homeHtml, $baseUrl);
-
-        $candidates = [];
-        foreach ($homeLinks as $link) {
-            $normalized = mb_strtolower($link['text'] . ' ' . $link['href']);
-            if (
-                str_contains($normalized, 'контакт')
-                || str_contains($normalized, 'contact')
-                || str_contains($normalized, 'kontakt')
-            ) {
-                $candidates[] = $link['absolute'];
-            }
-        }
-
-        $fallbackPaths = [
-            '/contacts',
-            '/contact',
-            '/kontakty',
-            '/contacts/',
-            '/about/contacts',
-        ];
-        foreach ($fallbackPaths as $path) {
-            $candidates[] = rtrim($baseUrl, '/') . $path;
-        }
-
-        $visited = [];
-        foreach ($candidates as $candidate) {
-            if (isset($visited[$candidate])) {
-                continue;
-            }
-            $visited[$candidate] = true;
-
-            try {
-                $html = $this->fetchUrl($candidate);
-                if ($this->looksLikeContactPage($html)) {
-                    return [
-                        'url' => $candidate,
-                        'html' => $html,
-                        'contacts_page_found' => true,
-                    ];
-                }
-            } catch (Throwable $e) {
-                continue;
-            }
-        }
-
-        return [
-            'url' => $baseUrl,
-            'html' => $homeHtml,
-            'contacts_page_found' => false,
-        ];
-    }
-
-    private function fetchUrl(string $url): string
-    {
-        $ch = curl_init($url);
-        if ($ch === false) {
-            throw new RuntimeException('Cannot initialize cURL');
-        }
-
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_MAXREDIRS => 5,
-            CURLOPT_CONNECTTIMEOUT => 8,
-            CURLOPT_TIMEOUT => 15,
-            CURLOPT_USERAGENT => 'B24CompanyEnricher/1.0',
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2,
-        ]);
-
-        $body = curl_exec($ch);
-        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        if ($body === false || $httpCode >= 400) {
-            throw new RuntimeException('Failed to fetch URL: ' . $url . ' (' . $error . ')');
-        }
-
-        return (string)$body;
-    }
-
-    /**
-     * @return array<int, array{text:string, href:string, absolute:string}>
-     */
-    private function extractLinks(string $html, string $baseUrl): array
-    {
-        $dom = new DOMDocument();
-        @$dom->loadHTML($html);
-
-        $links = [];
-        foreach ($dom->getElementsByTagName('a') as $node) {
-            $href = trim((string)$node->getAttribute('href'));
-            if ($href === '' || str_starts_with($href, 'javascript:') || str_starts_with($href, '#')) {
-                continue;
-            }
-
-            $text = trim((string)$node->textContent);
-            $absolute = $this->toAbsoluteUrl($href, $baseUrl);
-
-            if ($absolute === '') {
-                continue;
-            }
-
-            $links[] = [
-                'text' => $text,
-                'href' => $href,
-                'absolute' => $absolute,
-            ];
-        }
-
-        return $links;
-    }
-
-    private function toAbsoluteUrl(string $href, string $baseUrl): string
-    {
-        if (preg_match('#^https?://#i', $href) === 1) {
-            return $href;
-        }
-
-        $parsed = parse_url($baseUrl);
-        if (!is_array($parsed) || !isset($parsed['scheme'], $parsed['host'])) {
-            return '';
-        }
-
-        $scheme = $parsed['scheme'];
-        $host = $parsed['host'];
-
-        if (str_starts_with($href, '//')) {
-            return $scheme . ':' . $href;
-        }
-
-        if (str_starts_with($href, '/')) {
-            return $scheme . '://' . $host . $href;
-        }
-
-        return rtrim($baseUrl, '/') . '/' . ltrim($href, '/');
-    }
-
-    private function looksLikeContactPage(string $html): bool
-    {
-        $text = mb_strtolower($this->htmlToText($html));
-
-        $signals = ['контакт', 'contact', 'телефон', 'phone', 'email', 'адрес', 'address'];
-        $hits = 0;
-        foreach ($signals as $signal) {
-            if (str_contains($text, $signal)) {
-                $hits++;
-            }
-        }
-
-        return $hits >= 2;
-    }
-
-    /**
-     * @return array{
-     *   fields: array<string, array{value:?string, confidence:float, source:string}>,
-     *   conflicts: array<int, string>
-     * }
-     */
-    private function extractContactsData(string $html, string $sourceUrl): array
-    {
-        $text = $this->htmlToText($html);
-        $conflicts = [];
-
-        $phones = $this->extractPhones($text);
-        $emails = $this->extractEmails($text);
-        $inns = $this->extractByPattern('/\b(?:ИНН|INN)\s*[:#]?\s*(\d{10,12})\b/ui', $text);
-        $ogrns = $this->extractByPattern('/\b(?:ОГРН|OGRN)\s*[:#]?\s*(\d{13})\b/ui', $text);
-        $kpps = $this->extractByPattern('/\b(?:КПП|KPP)\s*[:#]?\s*(\d{9})\b/ui', $text);
-        $companyNames = $this->extractCompanyNames($html);
-        $address = $this->extractAddress($text);
-
-        if (count($phones) > 1) {
-            $conflicts[] = 'Найдено несколько телефонов: ' . implode(', ', array_slice($phones, 0, 3));
-        }
-        if (count($emails) > 1) {
-            $conflicts[] = 'Найдено несколько email: ' . implode(', ', array_slice($emails, 0, 3));
-        }
-
-        return [
-            'fields' => [
-                'company_name' => $this->buildField($companyNames[0] ?? null, $sourceUrl, count($companyNames)),
-                'address' => $this->buildField($address, $sourceUrl, $address === null ? 0 : 1),
-                'phone' => $this->buildField($phones[0] ?? null, $sourceUrl, count($phones)),
-                'email' => $this->buildField($emails[0] ?? null, $sourceUrl, count($emails)),
-                'inn' => $this->buildField($inns[0] ?? null, $sourceUrl, count($inns)),
-                'ogrn' => $this->buildField($ogrns[0] ?? null, $sourceUrl, count($ogrns)),
-                'kpp' => $this->buildField($kpps[0] ?? null, $sourceUrl, count($kpps)),
-            ],
-            'conflicts' => $conflicts,
-        ];
-    }
-
-    private function htmlToText(string $html): string
-    {
-        $stripped = strip_tags($html);
-        $decoded = html_entity_decode($stripped, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        $normalized = preg_replace('/\s+/u', ' ', $decoded) ?? '';
-
-        return trim($normalized);
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    private function extractPhones(string $text): array
-    {
-        preg_match_all('/(?:(?:\+|8)\s?[\d\-\(\)\s]{9,16}\d)/u', $text, $matches);
-        $phones = array_map(static fn (string $v): string => trim($v), $matches[0] ?? []);
-        $phones = array_filter($phones, static fn (string $v): bool => preg_match('/\d{10,}/', preg_replace('/\D+/', '', $v) ?? '') === 1);
-
-        return array_values(array_unique($phones));
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    private function extractEmails(string $text): array
-    {
-        preg_match_all('/[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/iu', $text, $matches);
-        $emails = array_map(static fn (string $v): string => mb_strtolower(trim($v)), $matches[0] ?? []);
-
-        return array_values(array_unique($emails));
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    private function extractByPattern(string $pattern, string $text): array
-    {
-        preg_match_all($pattern, $text, $matches);
-        $values = array_map(static fn (string $v): string => trim($v), $matches[1] ?? []);
-
-        return array_values(array_unique($values));
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    private function extractCompanyNames(string $html): array
-    {
-        $dom = new DOMDocument();
-        @$dom->loadHTML($html);
-        $xpath = new DOMXPath($dom);
-
-        $candidates = [];
-        foreach (['//h1', '//title', '//meta[@property="og:site_name"]/@content'] as $query) {
-            $nodes = $xpath->query($query);
-            if ($nodes === false) {
-                continue;
-            }
-            foreach ($nodes as $node) {
-                $value = trim((string)$node->nodeValue);
-                if ($value !== '') {
-                    $candidates[] = preg_replace('/\s+/u', ' ', $value) ?? $value;
-                }
-            }
-        }
-
-        return array_values(array_unique($candidates));
-    }
-
-    private function extractAddress(string $text): ?string
-    {
-        if (preg_match('/(?:адрес|address)\s*[:\-]?\s*([^\.]{10,200})/ui', $text, $m) === 1) {
-            return trim($m[1]);
-        }
-
-        return null;
-    }
-
-    /**
-     * @return array{value:?string, confidence:float, source:string}
-     */
-    private function buildField(?string $value, string $sourceUrl, int $candidateCount): array
-    {
-        if ($value === null || $value === '') {
-            return [
-                'value' => null,
-                'confidence' => 0.0,
-                'source' => $sourceUrl,
-            ];
-        }
-
-        $confidence = 0.95;
-        if ($candidateCount > 1) {
-            $confidence = 0.65;
-        }
-
-        return [
-            'value' => $value,
-            'confidence' => $confidence,
-            'source' => $sourceUrl,
-        ];
-    }
-
-    private function extractCity(string $address): string
-    {
-        if ($address === '') {
-            return '';
-        }
-
-        if (preg_match('/\bг\.?\s*([А-ЯA-ZЁ][А-ЯA-ZЁа-яa-z\- ]+)/u', $address, $m) === 1) {
-            return trim($m[1]);
-        }
-
-        return '';
-    }
-
-    private function buildComments(array $contactsData, string $sourceUrl): string
-    {
-        $parts = [];
-        $parts[] = 'Проверка выполнена по странице: ' . $sourceUrl;
-        $parts[] = 'Данные извлечены без генерации отсутствующих полей.';
-
-        if (!empty($contactsData['conflicts'])) {
-            $parts[] = 'Обнаружены конфликты: ' . implode(' | ', $contactsData['conflicts']);
-        } else {
-            $parts[] = 'Конфликты не обнаружены.';
-        }
-
-        return implode(' ', $parts);
-    }
-
     private function guessCompanyName(string $domain): string
     {
         $firstPart = explode('.', $domain)[0] ?? 'company';
         $firstPart = str_replace(['-', '_'], ' ', $firstPart);
 
         return mb_convert_case($firstPart, MB_CASE_TITLE, 'UTF-8');
+    }
+
+    /**
+     * @return array{promo?:string, ads?:string, support?:string}
+     */
+    private function parseDepartmentContacts(string $departmentContacts): array
+    {
+        $result = [];
+        if ($departmentContacts === '') {
+            return $result;
+        }
+
+        $parts = array_map('trim', explode('|', $departmentContacts));
+        foreach ($parts as $part) {
+            if ($part === '' || !str_contains($part, ':')) {
+                continue;
+            }
+            [$labelRaw, $valueRaw] = array_map('trim', explode(':', $part, 2));
+            $label = mb_strtolower($labelRaw);
+            $value = trim($valueRaw);
+            if ($value === '') {
+                continue;
+            }
+
+            if (!isset($result['promo']) && (str_contains($label, 'акц') || str_contains($label, 'promo'))) {
+                $result['promo'] = $value;
+                continue;
+            }
+            if (!isset($result['ads']) && (str_contains($label, 'реклам') || str_contains($label, 'marketing') || str_contains($label, 'media') || $label === 'pr')) {
+                $result['ads'] = $value;
+                continue;
+            }
+            if (!isset($result['support']) && (str_contains($label, 'поддерж') || str_contains($label, 'support') || str_contains($label, 'help'))) {
+                $result['support'] = $value;
+            }
+        }
+
+        return $result;
     }
 }

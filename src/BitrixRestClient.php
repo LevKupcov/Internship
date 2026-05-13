@@ -2,11 +2,22 @@
 
 declare(strict_types=1);
 
+/**
+ * Тонкая обёртка над Bitrix24 REST: один метод → JSON-ответ (ошибки через исключение).
+ */
 final class BitrixRestClient
 {
-    public function call(string $portalDomain, string $authId, string $method, array $params = []): array
+    public function call(string $portalDomain, string $authToken, string $method, array $params = []): array
     {
-        $baseUrl = sprintf('https://%s/rest/%s.json?auth=%s', $portalDomain, $method, urlencode($authId));
+        $cleanDomain = preg_replace('#^https?://#i', '', trim($portalDomain)) ?? '';
+        $cleanDomain = trim($cleanDomain, "/ \t\n\r\0\x0B");
+        if ($cleanDomain === '') {
+            throw new RuntimeException('Invalid portal domain');
+        }
+
+        $baseUrl = sprintf('https://%s/rest/%s.json?auth=%s', $cleanDomain, $method, urlencode($authToken));
+        $requestParams = $params;
+        $requestParams['auth'] = $authToken;
 
         $ch = curl_init($baseUrl);
         if ($ch === false) {
@@ -16,7 +27,7 @@ final class BitrixRestClient
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => http_build_query($params),
+            CURLOPT_POSTFIELDS => http_build_query($requestParams),
             CURLOPT_TIMEOUT => 15,
         ]);
 

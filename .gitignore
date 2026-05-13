@@ -4,3 +4,9 @@
 /.idea/
 /.vscode/
 *.log
+
+# Локальные данные (создаются при работе приложения)
+/storage/logs/*.jsonl
+!/storage/logs/.gitkeep
+/storage/mapping/mapping-store.json
+!/storage/mapping/.gitkeep
